@@ -1,5 +1,7 @@
 # k8s-deploy
 
+[![verify](https://github.com/keerthikondisetty/k8s-deploy/actions/workflows/verify.yml/badge.svg)](https://github.com/keerthikondisetty/k8s-deploy/actions/workflows/verify.yml) [![licence](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 Kubernetes manifests and a Helm chart for
 [devops-demo-app](https://github.com/keerthikondisetty/devops-demo-app),
 verified by actually deploying them to a cluster rather than by linting the
