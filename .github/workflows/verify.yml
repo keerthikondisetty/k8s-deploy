@@ -1,0 +1,88 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: schemas and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/
+
+      - name: validate the manifests against real API schemas
+        run: kubeconform -strict -summary -ignore-missing-schemas manifests/
+
+      - uses: azure/setup-helm@v4
+
+      - name: lint the chart
+        run: helm lint chart/
+
+      - name: the chart renders to valid objects
+        # Rendering and validating the output, not just linting the templates.
+        # A chart can lint cleanly and still produce a Deployment the API
+        # server rejects.
+        run: |
+          helm template demo chart/ > rendered.yaml
+          kubeconform -strict -summary -ignore-missing-schemas rendered.yaml
+
+      - name: the chart refuses an unsatisfiable disruption budget
+        # A PDB whose minAvailable equals minReplicas blocks every node drain
+        # forever, and you find that out during an upgrade at the worst moment.
+        # The chart fails the render instead. This asserts that guard works.
+        run: |
+          set -euo pipefail
+          if helm template demo chart/ \
+              --set podDisruptionBudget.minAvailable=3 \
+              --set autoscaling.minReplicas=3 >/dev/null 2>&1; then
+            echo "the chart accepted a PDB that would block every drain" >&2
+            exit 1
+          fi
+          echo "rejected, as intended"
+
+      - uses: ludeeus/action-shellcheck@master
+        with:
+          additional_files: scripts
+
+  cluster:
+    name: deploy to a real cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: k8s-deploy-verify
+          wait: 120s
+
+      # kubeconform proves the YAML matches a schema. It says nothing about
+      # whether the pods start, whether the probes point at endpoints that
+      # exist, or whether the NetworkPolicy lets the app reach its own
+      # database. That is what this job is for.
+      - name: verify against the cluster
+        env:
+          CLUSTER: k8s-deploy-verify
+          KEEP: "1"   # kind-action owns the cluster lifecycle
+        run: ./scripts/kind-verify.sh --existing-cluster
+
+      - if: failure()
+        run: |
+          kubectl -n demo get pods -o wide || true
+          kubectl -n demo describe pods || true
+          kubectl -n demo logs -l app=demo-app --tail=50 || true
