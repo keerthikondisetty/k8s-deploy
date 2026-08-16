@@ -1,0 +1,6 @@
+apiVersion: v2
+name: demo-app
+description: The demo application, as a chart. The same objects as manifests/, parameterised.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

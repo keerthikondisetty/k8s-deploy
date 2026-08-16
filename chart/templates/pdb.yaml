@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if ge (int .Values.podDisruptionBudget.minAvailable) (int .Values.autoscaling.minReplicas) }}
+{{- fail (printf "minAvailable (%v) must be below minReplicas (%v), or no node can ever be drained" .Values.podDisruptionBudget.minAvailable .Values.autoscaling.minReplicas) }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" . | nindent 6 }}
+{{- end }}

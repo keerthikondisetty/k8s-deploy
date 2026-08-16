@@ -1,0 +1,44 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/keerthikondisetty/devops-demo-app
+  # Empty means "use appVersion". Pin a digest in anything that matters: a tag
+  # can be moved under you, and then what is running is not what you reviewed.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  host: demo.local
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    # No CPU limit on purpose. See the README: exceeding memory kills the
+    # process, exceeding CPU only throttles it, and throttling a latency
+    # sensitive service to protect an idle node makes things worse.
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+config:
+  APP_PORT: "8000"
+  LOG_LEVEL: "info"
+
+# Never put a real value here. A chart's values end up in git, in CI logs and
+# in `helm get values`. This points at an existing Secret instead.
+existingSecret: demo-app
