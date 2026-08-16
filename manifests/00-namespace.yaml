@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    name: demo
+    # Pod Security Admission, enforced. Without this label the namespace has
+    # no baseline at all and a privileged pod is admitted without comment.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # warn and audit as well, so a manifest that would be rejected shows up
+    # in review rather than at apply time.
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

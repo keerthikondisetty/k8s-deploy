@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-app
+  namespace: demo
+data:
+  APP_PORT: "8000"
+  LOG_LEVEL: "info"
+
+---
+# In a real cluster this is an ExternalSecret pointing at Secrets Manager, or
+# a sealed secret. A plain Secret is base64, which is encoding, not
+# encryption -- anyone with get access on the namespace can read it.
+#
+# It is here so the manifests are complete and runnable. The value is a
+# throwaway for a local kind cluster and is not used anywhere else.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: demo-app
+  namespace: demo
+type: Opaque
+stringData:
+  DATABASE_URL: postgresql://shortener:shortener@postgres:5432/shortener
