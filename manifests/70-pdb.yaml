@@ -1,0 +1,15 @@
+# Without this, draining a node for an upgrade can evict every replica at
+# once. The Deployment will replace them, but not before the Service has no
+# endpoints -- a self-inflicted outage during routine maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: demo-app
+  namespace: demo
+spec:
+  # minAvailable rather than maxUnavailable, so it keeps meaning the same
+  # thing when the HPA changes the replica count.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: demo-app
