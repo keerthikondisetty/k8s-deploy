@@ -1,0 +1,73 @@
+# Default deny, then allow exactly what is needed.
+#
+# Without a policy every pod in the cluster can reach every other pod. This is
+# the single highest-value manifest here and the one most often missing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: demo-app
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: demo-app
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # To Postgres, and nothing else in the cluster.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # DNS. Forgetting this is the classic first NetworkPolicy mistake: every
+    # name lookup fails and the symptom looks like the application is broken.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: demo-app
+      ports:
+        - protocol: TCP
+          port: 5432
+  # No egress rules. The database has no reason to originate connections.
