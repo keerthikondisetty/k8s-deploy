@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: demo
+  labels:
+    app: demo-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never fewer than the current replica count during a rollout, and only
+      # one extra pod at a time. maxUnavailable of 1 with 3 replicas means a
+      # third of capacity disappears the moment a deploy starts.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: demo-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Spread across nodes. Without this the scheduler is free to put all
+      # three replicas on one node, and then "3 replicas" buys you nothing
+      # when that node goes away.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          # ScheduleAnyway, not DoNotSchedule: on a single-node cluster the
+          # strict version leaves two pods Pending forever.
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: demo-app
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: app
+          image: ghcr.io/keerthikondisetty/devops-demo-app:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+          envFrom:
+            - configMapRef:
+                name: demo-app
+            - secretRef:
+                name: demo-app
+
+          # Three probes, and they are three different questions.
+          #
+          # startup: has it finished booting? While this is failing the other
+          # two are not run at all, which is what stops a slow start being
+          # mistaken for a crash loop.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+
+          # liveness: is the process wedged? Points at /healthz, which does
+          # not touch the database on purpose -- if it did, a database blip
+          # would restart every pod at once and fix nothing.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # readiness: can it serve? Points at /readyz, which does check the
+          # database, so a pod that cannot reach Postgres leaves the Service
+          # and comes back on its own.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # Memory limit but no CPU limit, deliberately. Exceeding memory
+              # is an OOMKill, so the limit protects the node. A CPU limit
+              # only throttles, and throttling a latency-sensitive service to
+              # protect a node that is not under pressure makes things worse.
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      # readOnlyRootFilesystem needs somewhere writable for gunicorn's
+      # temporary files.
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Long enough for in-flight requests to finish before SIGKILL.
+      terminationGracePeriodSeconds: 30
