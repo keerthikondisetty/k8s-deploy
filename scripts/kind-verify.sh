@@ -172,18 +172,53 @@ check_probes_are_distinct() {
 
 check_traffic() {
   log "the service actually serves"
-  local code
-  code=$(kubectl -n "${NAMESPACE}" run curl-test --rm -i --restart=Never \
-    --image=curlimages/curl:8.11.1 --quiet -- \
-    -s -o /dev/null -w '%{http_code}' \
-    -X POST http://demo-app/shorten \
-    -H 'content-type: application/json' \
-    -d '{"url":"https://example.com/k8s"}' 2>/dev/null | tr -d '\r')
 
+  # port-forward rather than a curl pod. Two reasons, both learned the hard
+  # way: a pod needs its image pulled inside the cluster, which is slow and
+  # can hang; and the default-deny NetworkPolicy in this namespace correctly
+  # refuses traffic from a pod that is not ingress-nginx, so the curl pod
+  # would sit there until it timed out. The policy was right and the test was
+  # wrong.
+  #
+  # port-forward goes through the API server, so it exercises the Service
+  # selector, the pod, and the application without crossing the pod network.
+  local pf_pid code
+  kubectl -n "${NAMESPACE}" port-forward service/demo-app 18080:80 >/dev/null 2>&1 &
+  pf_pid=$!
+
+  # Poll rather than sleeping a fixed amount and hoping the tunnel is up.
+  local _
+  for _ in $(seq 1 20); do
+    if curl -sf "http://localhost:18080/healthz" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST http://localhost:18080/shorten \
+    -H 'content-type: application/json' \
+    -d '{"url":"https://example.com/k8s"}' 2>/dev/null || echo "000")
+
+  local location=""
   if [[ "${code}" == "201" ]]; then
-    pass "created a short link through the Service (HTTP ${code})"
-  else
+    local short
+    short=$(curl -sf -X POST http://localhost:18080/shorten \
+      -H 'content-type: application/json' \
+      -d '{"url":"https://example.com/k8s"}' \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')
+    location=$(curl -s -o /dev/null -w '%{redirect_url}' "http://localhost:18080/${short}")
+  fi
+
+  kill "${pf_pid}" 2>/dev/null || true
+  wait "${pf_pid}" 2>/dev/null || true
+
+  if [[ "${code}" != "201" ]]; then
     fail "expected 201 from the Service, got '${code}'"
+  elif [[ "${location}" != "https://example.com/k8s" ]]; then
+    fail "the redirect went to '${location}' rather than the original url"
+  else
+    pass "shortened and followed a link through the Service"
   fi
 }
 
