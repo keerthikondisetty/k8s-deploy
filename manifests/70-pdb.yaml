@@ -13,3 +13,19 @@ spec:
   selector:
     matchLabels:
       app: demo-app
+
+---
+# The worker gets one too. Losing every worker at once does not drop traffic,
+# because the queue is durable, but it does stop the queue draining -- and the
+# queue-age alert fires while a node drain is in progress, which is a confusing
+# page to receive.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: demo-worker
+  namespace: demo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: demo-worker

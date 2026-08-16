@@ -1,0 +1,92 @@
+# The worker, as its own Deployment.
+#
+# Same image as the receiver, different command. Separate because they scale on
+# completely different signals: the receiver on request rate, the worker on how
+# far behind the queue is. Running them in one pod means scaling for a burst of
+# webhooks also scales the thing consuming them, and vice versa, and neither
+# number is ever right.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-worker
+  namespace: demo
+  labels:
+    app: demo-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-worker
+  strategy:
+    # Recreate, not RollingUpdate. During a rolling update old and new workers
+    # run together, which is safe here because SKIP LOCKED means they cannot
+    # take the same delivery -- but Recreate keeps the deploy simple and the
+    # queue is durable, so a few seconds with no consumer costs nothing.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: demo-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: worker
+          image: ghcr.io/keerthikondisetty/devops-demo-app:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.worker"]
+
+          envFrom:
+            - configMapRef:
+                name: demo-app
+            - secretRef:
+                name: demo-app
+
+          # No HTTP probes: this process has no HTTP server. An exec probe
+          # asking whether it can reach the queue is the equivalent question.
+          #
+          # There is deliberately no readiness probe at all. Readiness controls
+          # Service endpoints, and nothing routes traffic to a worker.
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "from app.db import pool; pool.open(); pool.connection().__enter__().execute('SELECT 1')"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # The number that makes graceful shutdown real. Kubernetes sends SIGTERM,
+      # waits this long, then SIGKILLs. The worker finishes the delivery it is
+      # holding and exits; set this too low and it gets killed mid-delivery,
+      # leaving a row in 'processing' that only the stuck-reclaim will recover.
+      terminationGracePeriodSeconds: 60

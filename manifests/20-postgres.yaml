@@ -34,11 +34,11 @@ spec:
               containerPort: 5432
           env:
             - name: POSTGRES_USER
-              value: shortener
+              value: hooks
             - name: POSTGRES_PASSWORD
-              value: shortener
+              value: hooks
             - name: POSTGRES_DB
-              value: shortener
+              value: hooks
             # Postgres refuses to initialise into a directory that is not
             # empty, and a mounted PVC contains lost+found. A subdirectory is
             # the documented way around it.
@@ -46,12 +46,12 @@ spec:
               value: /var/lib/postgresql/data/pgdata
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "shortener"]
+              command: ["pg_isready", "-U", "hooks"]
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "shortener"]
+              command: ["pg_isready", "-U", "hooks"]
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:

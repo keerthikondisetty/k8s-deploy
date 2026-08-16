@@ -6,6 +6,7 @@ metadata:
 data:
   APP_PORT: "8000"
   LOG_LEVEL: "info"
+  WEBHOOK_SOURCES: "github,stripe"
 
 ---
 # In a real cluster this is an ExternalSecret pointing at Secrets Manager, or
@@ -21,4 +22,6 @@ metadata:
   namespace: demo
 type: Opaque
 stringData:
-  DATABASE_URL: postgresql://shortener:shortener@postgres:5432/shortener
+  DATABASE_URL: postgresql://hooks:hooks@postgres:5432/hooks
+  WEBHOOK_SECRET_GITHUB: local-kind-secret
+  WEBHOOK_SECRET_STRIPE: local-kind-secret

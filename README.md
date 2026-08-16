@@ -11,19 +11,22 @@ YAML.
 ./scripts/kind-verify.sh
 ```
 
-Creates a kind cluster, applies everything, runs nine checks against the
+Creates a kind cluster, applies everything, runs twelve checks against the
 running workload, and deletes the cluster.
 
 ```
    PASS postgres is ready
    PASS all replicas rolled out
+   PASS the worker rolled out
    PASS 3 replicas ready
    PASS running as uid 10001
    PASS the root filesystem rejects writes
    PASS liveness /healthz, readiness /readyz
-   PASS shortened and followed a link through the Service
+   PASS signed delivery accepted (202), unsigned refused (401)
+   PASS 1 delivery/deliveries processed by a worker
    PASS the application can resolve postgres
    PASS 1 disruption(s) allowed, so a node can be drained
+   PASS the worker logged a clean shutdown
 ```
 
 ## Why a cluster and not just kubeconform
@@ -42,6 +45,32 @@ uid=$(kubectl -n demo exec deploy/demo-app -- id -u)
 
 Reading `runAsUser` back out of my own manifest would only prove I can grep a
 file I just wrote.
+
+## Two Deployments, one image
+
+The receiver and the worker are separate Deployments running the same image
+with different commands. That is the decision I would lead with.
+
+They scale on completely different signals: the receiver on request rate, the
+worker on how far behind the queue is. In one pod, scaling for a burst of
+webhooks also scales the thing consuming them, and neither number is ever
+right.
+
+It also changes what "healthy" means for each. The receiver has liveness and
+readiness over HTTP. The worker has **no readiness probe at all**, because
+readiness controls Service endpoints and nothing routes traffic to a worker.
+Its liveness is an exec probe asking the only question that matters for that
+process: can it reach the queue.
+
+The `terminationGracePeriodSeconds: 60` on the worker is what makes graceful
+shutdown real. Kubernetes sends SIGTERM, waits, then SIGKILLs. The worker
+finishes the delivery in its hands and exits; set it too low and it gets
+killed mid-delivery, leaving a row in `processing` that only the stuck-reclaim
+recovers.
+
+The verification script deletes a worker pod and greps its log for the
+clean-shutdown line, because that behaviour is invisible until the day it
+matters.
 
 ## The decisions worth asking me about
 
@@ -99,6 +128,10 @@ The DNS rule is the part everyone forgets on their first NetworkPolicy. Miss
 it and every name lookup fails, which presents as "the application is broken"
 rather than "the network policy is wrong". The verification script resolves a
 hostname from inside a pod specifically to catch that.
+
+The worker's policy has `ingress: []`, meaning none at all. Nothing should
+ever connect to it, and saying so explicitly means an accidental Service
+pointing at it does not quietly start working.
 
 The policy also caught a mistake in my own test. The traffic check originally
 ran `curl` from a throwaway pod in the same namespace, and it hung: the
@@ -195,8 +228,9 @@ an object the API server rejects), and asserts the PDB guard actually fires.
 ## Layout
 
 ```
-manifests/          namespace, config, postgres, deployment, service,
-                    ingress, HPA, PDB, network policies
+manifests/          namespace, config, postgres, receiver Deployment,
+                    worker Deployment, service, ingress, HPA, PDBs,
+                    network policies
 chart/              the same objects, parameterised
 scripts/kind-verify.sh   create a cluster, deploy, prove it works
 ```

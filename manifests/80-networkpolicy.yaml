@@ -52,6 +52,39 @@ spec:
           port: 53
 
 ---
+# The worker takes no ingress whatsoever. Nothing should ever connect to it,
+# and saying so explicitly means an accidental Service pointing at it does not
+# quietly start working.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: demo-worker
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: demo-worker
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -67,6 +100,9 @@ spec:
         - podSelector:
             matchLabels:
               app: demo-app
+        - podSelector:
+            matchLabels:
+              app: demo-worker
       ports:
         - protocol: TCP
           port: 5432

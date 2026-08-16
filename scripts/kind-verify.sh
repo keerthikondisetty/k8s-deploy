@@ -58,7 +58,7 @@ main() {
     esac
   done
 
-  require kind kubectl docker
+  require kind kubectl docker openssl
   docker info >/dev/null 2>&1 || die "the docker daemon is not running"
 
   trap cleanup EXIT
@@ -109,12 +109,21 @@ main() {
     return
   fi
 
+  log "waiting for the worker"
+  if kubectl -n "${NAMESPACE}" rollout status deployment/demo-worker --timeout=180s >/dev/null; then
+    pass "the worker rolled out"
+  else
+    fail "the worker never became ready"
+  fi
+
   check_replicas
   check_security_context
   check_probes_are_distinct
   check_traffic
+  check_worker_drains_the_queue
   check_networkpolicy
   check_pdb
+  check_worker_shuts_down_gracefully
 
   printf '\n   %d passed, %d failed\n' "${PASSED}" "${FAILED}"
   (( FAILED == 0 )) || exit 1
@@ -171,54 +180,102 @@ check_probes_are_distinct() {
 }
 
 check_traffic() {
-  log "the service actually serves"
+  log "the receiver accepts a signed delivery"
 
-  # port-forward rather than a curl pod. Two reasons, both learned the hard
-  # way: a pod needs its image pulled inside the cluster, which is slow and
-  # can hang; and the default-deny NetworkPolicy in this namespace correctly
-  # refuses traffic from a pod that is not ingress-nginx, so the curl pod
-  # would sit there until it timed out. The policy was right and the test was
-  # wrong.
-  #
-  # port-forward goes through the API server, so it exercises the Service
-  # selector, the pod, and the application without crossing the pod network.
-  local pf_pid code
+  # port-forward rather than a curl pod. The default-deny NetworkPolicy in this
+  # namespace correctly refuses anything that is not ingress-nginx, so a
+  # throwaway curl pod hangs. port-forward goes through the API server and
+  # exercises the Service selector, the pod and the application without
+  # crossing the pod network.
+  local pf_pid code body signature secret="local-kind-secret"
   kubectl -n "${NAMESPACE}" port-forward service/demo-app 18080:80 >/dev/null 2>&1 &
   pf_pid=$!
 
-  # Poll rather than sleeping a fixed amount and hoping the tunnel is up.
   local _
   for _ in $(seq 1 20); do
-    if curl -sf "http://localhost:18080/healthz" >/dev/null 2>&1; then
-      break
-    fi
+    curl -sf "http://localhost:18080/healthz" >/dev/null 2>&1 && break
     sleep 1
   done
 
-  code=$(curl -s -o /dev/null -w '%{http_code}' \
-    -X POST http://localhost:18080/shorten \
-    -H 'content-type: application/json' \
-    -d '{"url":"https://example.com/k8s"}' 2>/dev/null || echo "000")
+  body='{"event":"push","from":"kind-verify"}'
+  signature="sha256=$(printf '%s' "${body}" \
+    | openssl dgst -sha256 -hmac "${secret}" -hex | awk '{print $NF}')"
 
-  local location=""
-  if [[ "${code}" == "201" ]]; then
-    local short
-    short=$(curl -sf -X POST http://localhost:18080/shorten \
-      -H 'content-type: application/json' \
-      -d '{"url":"https://example.com/k8s"}' \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')
-    location=$(curl -s -o /dev/null -w '%{redirect_url}' "http://localhost:18080/${short}")
-  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST http://localhost:18080/webhooks/github \
+    -H 'content-type: application/json' \
+    -H "X-Delivery-Id: kind-$(date +%s)-${RANDOM}" \
+    -H "X-Signature-256: ${signature}" \
+    --data-binary "${body}" 2>/dev/null || echo "000")
+
+  # And an unsigned one, which must be refused. A receiver that accepts
+  # anything is worse than one that is down.
+  local unsigned
+  unsigned=$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST http://localhost:18080/webhooks/github \
+    -H 'content-type: application/json' \
+    -H "X-Delivery-Id: kind-unsigned" \
+    -H "X-Signature-256: sha256=deadbeef" \
+    --data-binary "${body}" 2>/dev/null || echo "000")
 
   kill "${pf_pid}" 2>/dev/null || true
   wait "${pf_pid}" 2>/dev/null || true
 
-  if [[ "${code}" != "201" ]]; then
-    fail "expected 201 from the Service, got '${code}'"
-  elif [[ "${location}" != "https://example.com/k8s" ]]; then
-    fail "the redirect went to '${location}' rather than the original url"
+  if [[ "${code}" != "202" ]]; then
+    fail "expected 202 for a signed delivery, got '${code}'"
+  elif [[ "${unsigned}" != "401" ]]; then
+    fail "expected 401 for an unsigned delivery, got '${unsigned}'"
   else
-    pass "shortened and followed a link through the Service"
+    pass "signed delivery accepted (202), unsigned refused (401)"
+  fi
+}
+
+check_worker_drains_the_queue() {
+  log "the worker actually processes what the receiver queued"
+
+  # The check that proves the two Deployments are wired to the same queue.
+  # The receiver returning 202 only means it wrote a row; this waits for a
+  # worker to pick it up and finish it.
+  local _ done_count=0
+  for _ in $(seq 1 30); do
+    done_count=$(kubectl -n "${NAMESPACE}" exec statefulset/postgres -- \
+      psql -U hooks -d hooks -tAc "SELECT count(*) FROM deliveries WHERE status='done'" \
+      2>/dev/null | tr -d '[:space:]')
+    [[ "${done_count:-0}" -ge 1 ]] && break
+    sleep 2
+  done
+
+  if [[ "${done_count:-0}" -ge 1 ]]; then
+    pass "${done_count} delivery/deliveries processed by a worker"
+  else
+    fail "nothing was processed; the worker is not draining the queue"
+    kubectl -n "${NAMESPACE}" logs -l app=demo-worker --tail=20 || true
+  fi
+}
+
+check_worker_shuts_down_gracefully() {
+  log "the worker finishes its work on SIGTERM rather than dying"
+
+  # The behaviour terminationGracePeriodSeconds exists for. Delete a pod and
+  # look for the clean-shutdown line; if the handler exited immediately, or
+  # ignored the signal until SIGKILL, it is not there.
+  local pod
+  pod=$(kubectl -n "${NAMESPACE}" get pods -l app=demo-worker \
+    -o jsonpath='{.items[0].metadata.name}')
+
+  kubectl -n "${NAMESPACE}" delete pod "${pod}" --wait=false >/dev/null 2>&1
+
+  local _ logs=""
+  for _ in $(seq 1 20); do
+    logs=$(kubectl -n "${NAMESPACE}" logs "${pod}" --tail=20 2>/dev/null || echo "")
+    [[ "${logs}" == *"shut down cleanly"* ]] && break
+    sleep 2
+  done
+
+  if [[ "${logs}" == *"shut down cleanly"* ]]; then
+    pass "the worker logged a clean shutdown"
+  else
+    fail "no clean shutdown in the log; SIGTERM is being ignored or the handler exits immediately"
   fi
 }
 
