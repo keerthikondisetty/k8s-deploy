@@ -76,7 +76,21 @@ main() {
   docker pull --quiet "${IMAGE}" >/dev/null 2>&1 \
     || die "could not pull ${IMAGE}. Has the app repository published one yet?"
 
-  kind load docker-image "${IMAGE}" --name "${CLUSTER}" >/dev/null
+  # Via a single-platform tar archive, not `kind load docker-image`.
+  #
+  # The published image is multi-arch. kind imports with --all-platforms and
+  # Docker's containerd store keeps the whole index, so both the direct load
+  # and a plain `docker save` fail with "content digest ...: not found" for
+  # the platform this machine never pulled. `docker save --platform` exports
+  # only the one the cluster is actually going to run.
+  local archive platform
+  platform="linux/$(docker version --format '{{.Server.Arch}}')"
+  archive="$(mktemp -t demo-app-XXXXXX.tar)"
+
+  docker save --platform "${platform}" "${IMAGE}" -o "${archive}" \
+    || die "could not export ${IMAGE} for ${platform}"
+  kind load image-archive "${archive}" --name "${CLUSTER}" >/dev/null
+  rm -f "${archive}"
 
   log "applying the manifests"
   kubectl apply -f manifests/ >/dev/null
